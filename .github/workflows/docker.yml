@@ -1,0 +1,170 @@
+# Build the private source here and publish a multi-arch image to GHCR.
+#
+# THIS REPOSITORY IS PUBLIC AND THE SOURCE IS NOT. Its logs are readable by
+# anyone, so:
+#
+#   - only a person with write access can start this (workflow_dispatch);
+#   - SOURCE_TOKEN is a read-only fine-grained PAT for nguyenthdat/burp-pro,
+#     kept in the environment `release`, which only main may use;
+#   - the Docker build log goes to a file, because a plain build log repeats the
+#     private Dockerfile and its RUN commands. On failure only error lines are
+#     shown; for the rest, run the same command locally;
+#   - no build cache and no artifacts of the source. Each arch pushes
+#     <tag>-linux-<arch>; the merge job joins them into multi-arch manifests.
+#
+# The runners are native (ubuntu-24.04 / ubuntu-24.04-arm), so the ~420 MB
+# installer and the Xvfb license activation never run under emulation.
+
+name: Docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Burp Suite version, like 2026.11.2
+        required: true
+        type: string
+        default: "2026.11.2"
+      source_ref:
+        description: Branch, tag, or commit in nguyenthdat/burp-pro
+        required: true
+        type: string
+        default: main
+      push_latest:
+        description: Also tag the manifest as `latest`
+        type: boolean
+        default: false
+      auto_activate:
+        description: Activate the license during the build
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: nguyenthdat/burp-pro
+  IMAGE: ghcr.io/theunknownzoo/burp-pro
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.inputs.outputs.tag }}
+    steps:
+      - name: Check the inputs
+        id: inputs
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^[0-9]{4}\.[0-9]{1,2}(\.[0-9]+)*$ ]] || { echo "::error::$TAG is not like 2026.11.2"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    environment: release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            burp_platform: linux
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            burp_platform: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Download the installer
+        id: installer
+        working-directory: source
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PLATFORM: ${{ matrix.burp_platform }}
+        run: |
+          echo "Fetching Burp Suite $TAG for $PLATFORM..."
+          python3 scripts/burp_download.py -v "$TAG" -p "$PLATFORM" -o installers --json \
+            > "$RUNNER_TEMP/installer.json"
+          file=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["filename"])' \
+            "$RUNNER_TEMP/installer.json")
+          sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' \
+            "$RUNNER_TEMP/installer.json")
+          echo "$file  sha256=$sha"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf %s "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push
+        working-directory: source
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          INSTALLER_FILE: ${{ steps.installer.outputs.file }}
+          ACTIVATE: ${{ inputs.auto_activate }}
+        run: |
+          docker buildx create --driver docker-container --name ci >/dev/null 2>&1 || true
+          docker buildx use ci
+          log="$RUNNER_TEMP/build.log"
+
+          echo "==> Building $IMAGE:$TAG-linux-$ARCH..."
+          if ! docker buildx build \
+                --platform "$PLATFORM" \
+                --build-arg INSTALLER_FILE="$INSTALLER_FILE" \
+                --build-arg AUTO_ACTIVATE="$ACTIVATE" \
+                --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+                --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+                --label "org.opencontainers.image.version=$TAG" \
+                -t "$IMAGE:$TAG-linux-$ARCH" \
+                --push \
+                . > "$log" 2>&1; then
+            grep -E '(^|\s)(ERROR|error:|failed|Error response)' "$log" | tail -40 || true
+            echo "::error::Build failed. The full log stays private; run the build locally."
+            exit 1
+          fi
+          echo "pushed $IMAGE:$TAG-linux-$ARCH"
+
+  merge:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Sign in to GHCR
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf %s "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Join the architectures
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          LATEST: ${{ inputs.push_latest }}
+        run: |
+          tags=(--tag "$IMAGE:$TAG")
+          [ "$LATEST" = true ] && tags+=(--tag "$IMAGE:latest")
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE:$TAG-linux-amd64" "$IMAGE:$TAG-linux-arm64"
+          docker buildx imagetools inspect "$IMAGE:$TAG"
