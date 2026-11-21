@@ -23,8 +23,6 @@ Run the workflow manually via GitHub Actions:
 2. Click **Run workflow**.
 3. Configure the inputs:
    - **`tag`**: Burp Suite version to download and publish (e.g. `2026.11.2`).
-   - **`source_ref`**: Branch, tag, or commit SHA in the private source repo
-     `nguyenthdat/burp-pro` (default: `main`).
    - **`push_latest`**: Also tag the manifest as `latest` (default: `false`).
    - **`auto_activate`**: Run the license activation during the build (default:
      `true`). Disable it to publish an unlicensed image and activate at runtime

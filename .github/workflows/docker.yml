@@ -25,11 +25,6 @@ on:
         required: true
         type: string
         default: "2026.11.2"
-      source_ref:
-        description: Branch, tag, or commit in nguyenthdat/burp-pro
-        required: true
-        type: string
-        default: main
       push_latest:
         description: Also tag the manifest as `latest`
         type: boolean
@@ -88,7 +83,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ inputs.source_ref }}
+          ref: main
           token: ${{ secrets.SOURCE_TOKEN }}
           persist-credentials: false
           path: source
