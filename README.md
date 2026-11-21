@@ -51,20 +51,6 @@ docker run --rm -it \
 docker run --rm ghcr.io/theunknownzoo/burp-pro:2026.11.2 --version
 ```
 
-### Activate an unlicensed image
-
-```bash
-# Build/publish with auto_activate: false, then:
-docker volume create burp-home
-docker run --rm --entrypoint burp-activate \
-  -v burp-home:/home/ninja \
-  ghcr.io/theunknownzoo/burp-pro:2026.11.2
-```
-
-The activation writes the keygen license and the activation response into
-`/home/ninja/.java/.userPrefs/burp/prefs.xml`, so keep `/home/ninja` on a volume
-if you want the license to survive a container restart.
-
 ## Workflow Architecture
 
 - **Native runners**: Builds run on `ubuntu-24.04` (amd64) and `ubuntu-24.04-arm`
